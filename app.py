@@ -1,7 +1,10 @@
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 from collectors import collect_news
+
+# 日本標準時 (JST) の定義
+JST = timezone(timedelta(hours=9))
 
 st.set_page_config(
     page_title="BestCar Auto News",
@@ -69,9 +72,11 @@ if st.sidebar.button("🔄 最新ニュースに更新", use_container_width=Tru
     st.cache_data.clear()
     st.rerun()
 
-# 最終更新日時
-last_updated = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
-st.sidebar.caption(f"最終取り込み時間:\n{last_updated}")
+# 更新日時（日本標準時）
+# 画面が読み込まれるたびに、現在のJST時刻を表示します
+last_updated = datetime.now(JST).strftime("%Y年%m月%d日 %H:%M:%S")
+st.sidebar.caption(f"データ最終同期 (JST):\n{last_updated}")
+st.sidebar.caption("※更新ボタン押下または画面操作時の時刻")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔍 フィルタ設定")
