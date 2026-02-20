@@ -61,18 +61,54 @@ if not news_items:
     st.stop()
 
 source_counts = Counter(item.get("source", "Unknown") for item in news_items)
-st.sidebar.header("Filter")
-all_sources = sorted(set(item["source"] for item in news_items))
-selected_sources = st.sidebar.multiselect("Sources", options=all_sources, default=all_sources)
 
+st.sidebar.header("📊 ニュース管理")
+
+# 更新ボタン
+if st.sidebar.button("🔄 最新ニュースに更新", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+# 最終更新日時
+last_updated = datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
+st.sidebar.caption(f"最終取り込み時間:\n{last_updated}")
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔍 フィルタ設定")
+
+all_sources = sorted(set(item["source"] for item in news_items))
+selected_sources = st.sidebar.multiselect("メーカー選択", options=all_sources, default=all_sources)
+search_query = st.sidebar.text_input("キーワード検索", placeholder="例: EV, SUV...")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("ソース別取得件数")
+for source in EXPECTED_SOURCES:
+    count = source_counts.get(source, 0)
+    label = "🟢" if count > 0 else "🔴"
+    st.sidebar.write(f"{label} {source}: {count}件")
+
+filtered_items = []
 for item in news_items:
-    if item["source"] not in selected_sources: continue
+    if item["source"] not in selected_sources:
+        continue
+    if search_query:
+        query = search_query.lower()
+        if query not in item["title"].lower() and query not in item.get("summary", "").lower():
+            continue
+    filtered_items.append(item)
+
+st.caption(f"表示件数: {len(filtered_items)} / 総取得件数: {len(news_items)}")
+
+for item in filtered_items:
     date_str = item["date"].strftime("%Y/%m/%d")
     st.markdown(f"""
     <div class="news-card">
         <div><span class="news-source">{item['source']}</span><span class="news-date">{date_str}</span></div>
         <div class="news-title"><a href="{item['url']}" target="_blank">{item['title']}</a></div>
         <div class="news-summary">{item['summary']}</div>
-        <a href="{item['url']}" target="_blank" class="read-more">Read more →</a>
+        <a href="{item['url']}" target="_blank" class="read-more">元記事を読む →</a>
     </div>
     """, unsafe_allow_html=True)
+
+st.markdown("---")
+st.markdown("© 2026 BestCar Auto News Project")
