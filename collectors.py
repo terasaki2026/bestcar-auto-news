@@ -1,4 +1,3 @@
-
 import feedparser
 import requests
 from bs4 import BeautifulSoup
@@ -7,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import concurrent.futures
 import traceback
 import sys
+import re
 
 # User-Agent for requests
 HEADERS = {
@@ -69,7 +69,7 @@ def fetch_page_summary(url):
         # 本文抽出（一般的なタグを狙う）
         # メーカーごとに構造が違うため、汎用的にpタグなどを集める
         # 不要なタグ（ナビゲーション、フッター）を除外
-        for tag in soup(["script", "style", "header", "footer", "nav", "noscript"]):
+        for tag in soup():
             tag.decompose()
         
         # メインコンテンツらしきものを探す
@@ -82,9 +82,8 @@ def fetch_page_summary(url):
                 text_content += t + " "
                 if len(text_content) > 300: break # 十分取れたら終了
         
-        return clean_text(text_content)[:200]
+        return clean_text(text_content)
     except Exception as e:
-        # print(f"Summary fetch failed for {url}: {e}")
         return ""
 
 # --- Independent Source Fetchers ---
@@ -95,21 +94,10 @@ def fetch_rss(url, source_name):
     """
     try:
         feed = feedparser.parse(url)
-        news_list = []
+        news_list =[]
         for entry in feed.entries:
             # Date parsing
             dt = None
-            if hasattr(entry, "published"):
-                try:
-                    dt = date_parser.parse(entry.published)
-                except:
-                    pass
-            elif hasattr(entry, "updated"):
-                try:
-                    dt = date_parser.parse(entry.updated)
-                except:
-                    pass
-            
             if hasattr(entry, "published"):
                 try:
                     dt = date_parser.parse(entry.published)
@@ -136,13 +124,13 @@ def fetch_rss(url, source_name):
             
             summary = clean_text(summary_raw)
             
-            # If summary is too short, fetch detail page content (e.g. for Mazda)
+            # If summary is too short, fetch detail page content
             if len(summary) < 50:
                  detail_summary = fetch_page_summary(entry.link)
                  if detail_summary:
                      summary = detail_summary
 
-            summary = summary[:200] # Limit length
+            summary = summary # Limit length
             if len(summary) >= 200: summary += "..."
             
             news_list.append({
@@ -155,37 +143,87 @@ def fetch_rss(url, source_name):
         return news_list
     except Exception as e:
         print(f"Error fetching RSS {source_name}: {e}")
-        return []
+        return[]
+
+def fetch_daihatsu():
+    """
+    Fetch Daihatsu news from their RSS feed.
+    """
+    url = "https://www.daihatsu.com/jp/rss.xml"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding
+        
+        soup = BeautifulSoup(resp.content, "xml")
+        items = soup.find_all("item")
+        news_list =[]
+        
+        for item in items:
+            raw_title = item.find("title").get_text(strip=True) if item.find("title") else ""
+            link = item.find("link").get_text(strip=True) if item.find("link") else ""
+            
+            # Extract date from title
+            dt = None
+            date_match = re.match(r"(\d{4}-\d{2}-\d{2})\s*", raw_title)
+            if date_match:
+                try:
+                    dt = date_parser.parse(date_match.group(1))
+                except:
+                    pass
+            
+            if dt is None:
+                continue
+            
+            if not is_within_period(dt):
+                continue
+            
+            # Clean title
+            clean_title = re.sub(r"^\d{4}-\d{2}-\d{2}\s*\\s*", "", raw_title)
+            if not clean_title:
+                clean_title = raw_title
+            
+            # Fetch summary
+            summary = fetch_page_summary(link)
+            if len(summary) >= 200:
+                summary += "..."
+            
+            news_list.append({
+                "source": "Daihatsu",
+                "title": clean_text(clean_title),
+                "url": link,
+                "date": dt,
+                "summary": summary
+            })
+        return news_list
+    except Exception as e:
+        print(f"Error fetching Daihatsu: {e}")
+        return[]
 
 def fetch_suzuki():
     """
     Fetch Suzuki news from their XML api.
-    URL: https://www.suzuki.co.jp/release/release.xml
     """
     url = "https://www.suzuki.co.jp/release/release.xml"
     base_url = "https://www.suzuki.co.jp"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
-        resp.encoding = resp.apparent_encoding # Ensure correct encoding (UTF-8 usually)
+        resp.encoding = resp.apparent_encoding
         
-        soup = BeautifulSoup(resp.content, "xml") # Use XML parser
+        soup = BeautifulSoup(resp.content, "xml")
         items = soup.find_all("item")
-        news_list = []
+        news_list =[]
         
-        # Limit items to check
-        for item in items[:15]:
+        for item in items:
             title = item.find("ttl").get_text(strip=True) if item.find("ttl") else "No Title"
             link_rel = item.find("link").get_text(strip=True) if item.find("link") else ""
             date_str = item.find("date").get_text(strip=True) if item.find("date") else ""
             
-            # Date parsing
             dt = None
             try:
-                # Common formats: 2026年2月13日, 2026.2.13, 2026/2/13
                 d_s = date_str.replace("年", "/").replace("月", "/").replace("日", "").replace(".", "/")
                 parsed_dt = date_parser.parse(d_s)
-                # Set time to 00:00:00 explicitly for date-only strings
                 dt = parsed_dt.replace(hour=0, minute=0, second=0, microsecond=0)
             except:
                 pass
@@ -211,59 +249,79 @@ def fetch_suzuki():
         return news_list
     except Exception as e:
         print(f"Error fetching Suzuki: {e}")
-        return []
+        return[]
 
 def fetch_mitsubishi():
     """
-    Fetch Mitsubishi Motors news from their JSON API.
-    URL: https://search-mmc.dga.jp/api/search_result_api.php
+    Fetch Mitsubishi Motors news from their official HTML page.
+    APIを使わず、直接ニュースリリース一覧ページをスクレイピングする方式に変更
     """
-    url = "https://search-mmc.dga.jp/api/search_result_api.php"
-    params = {
-        "site": "newsja", # Japanese news
-        "disp_num": 20,   # 20 items
-        "page": 1,
-        "ord": "d",       # Descending
-        "target": "all"   # Target all categories
-    }
+    url = "https://www.mitsubishi-motors.com/jp/newsroom/newsrelease/"
+    base_url = "https://www.mitsubishi-motors.com"
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
+        resp.encoding = resp.apparent_encoding
+        soup = BeautifulSoup(resp.content, "html.parser")
         
-        news_list = []
-        if "search_result" in data:
-            for item in data["search_result"]:
-                title = item.get("title", "")
-                link = item.get("url", "")
-                date_str = item.get("mdate", "") # "2026-02-06 13:30:00"
-                summary = item.get("body", "")
+        news_list =[]
+        
+        # ニュース一覧を抽出（よくあるクラス名で広く拾えるように複数指定）
+        items = soup.select(".newsList li, .news-list-item, .list-news li, .c-newsList__item")
+        
+        for item in items: # 直近20件に制限
+            title_node = item.select_one("a")
+            if not title_node:
+                continue
+            
+            title = title_node.get_text(strip=True)
+            link = title_node.get("href")
+            
+            if not link or link.startswith("javascript"):
+                continue
                 
-                dt = datetime.now()
+            # 相対パスを絶対URLに変換
+            if link.startswith("/"):
+                link = base_url + link
+                
+            # 日付の取得（<time> タグや特定のクラス名を探す）
+            date_node = item.select_one("time, .date, .c-newsList__date")
+            dt = None
+            if date_node:
+                date_str = date_node.get_text(strip=True)
+                # "2026年2月13日" や "2026.02.13" などを標準フォーマットに変換
+                d_s = date_str.replace("年", "/").replace("月", "/").replace("日", "").replace(".", "/")
                 try:
-                    dt = date_parser.parse(date_str)
+                    dt = date_parser.parse(d_s)
+                    dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
                 except:
                     pass
+            
+            # 日付が取得できない、または期間外の場合はスキップ
+            if dt is None or not is_within_period(dt):
+                continue
+                
+            # 詳細ページから本文の冒頭を取得して要約にする
+            summary = fetch_page_summary(link)
+            if len(summary) >= 200: 
+                summary += "..."
 
-                if not is_within_period(dt):
-                    continue
-
-                news_list.append({
-                    "source": "Mitsubishi Motors",
-                    "title": clean_text(title),
-                    "url": link,
-                    "date": dt,
-                    "summary": clean_text(summary)[:200] + "..." if summary else ""
-                })
+            news_list.append({
+                "source": "Mitsubishi Motors",
+                "title": clean_text(title),
+                "url": link,
+                "date": dt,
+                "summary": summary
+            })
+            
         return news_list
     except Exception as e:
         print(f"Error fetching Mitsubishi: {e}")
-        return []
+        return[]
 
 def fetch_nissan():
     """
     Fetch Nissan Global news (JP) by scraping the HTML list.
-    URL: https://global.nissannews.com/ja-JP/channels/news
     """
     url = "https://global.nissannews.com/ja-JP/channels/news"
     base_domain = "https://global.nissannews.com"
@@ -272,12 +330,10 @@ def fetch_nissan():
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
         
-        # Select items
         items = soup.select("div.release-item")
-        news_list = []
+        news_list =[]
         
-        # Limit to first 15 items to fetch details for speed
-        for item in items[:15]:
+        for item in items:
             title_node = item.select_one("div.title a")
             if not title_node:
                 continue
@@ -289,11 +345,9 @@ def fetch_nissan():
             elif link and not link.startswith("http"):
                  pass 
 
-            # Date
             date_node = item.select_one("time.pub-date")
             dt = None
             if date_node:
-                # Try datetime attribute first
                 dt_attr = date_node.get("datetime")
                 if dt_attr:
                     try:
@@ -301,11 +355,9 @@ def fetch_nissan():
                     except:
                         pass
                 
-                # Try text content fallback
                 if dt is None:
                     try:
                         d_text = date_node.get_text(strip=True)
-                        # Replace JP chars
                         d_text = d_text.replace("年", "/").replace("月", "/").replace("日", "").replace(".", "/")
                         parsed_dt = date_parser.parse(d_text)
                         dt = parsed_dt.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -331,7 +383,7 @@ def fetch_nissan():
         return news_list
     except Exception as e:
         print(f"Error fetching Nissan: {e}")
-        return []
+        return[]
 
 
 # --- Main Coordinator ---
@@ -341,34 +393,27 @@ def collect_news():
     Collects news from all sources in parallel.
     Returns: List of dictionaries sorted by date (newest first).
     """
-    sources = [
-        ("Toyota", "https://global.toyota/export/jp/allnews_rss.xml", "rss"),
-        ("Honda", "https://global.honda/jp/rss/hotnews.xml", "rss"),
-        ("Mazda", "https://newsroom.mazda.com/ja/rss/publicity.xml", "rss"),
-        ("Subaru", "https://www.subaru.co.jp/press/news/feed/", "rss"),
-        ("Daihatsu", "https://www.daihatsu.com/jp/rss.xml", "rss"),
-        ("Suzuki", None, "suzuki"),
-        ("Mitsubishi Motors", None, "mitsubishi"),
-        ("Nissan", None, "nissan")
-    ]
+    sources =
     
-    all_news = []
+    all_news =[]
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_map = {}
         for name, url, method in sources:
             if method == "rss":
                 future = executor.submit(fetch_rss, url, name)
+            elif method == "daihatsu":
+                future = executor.submit(fetch_daihatsu)
             elif method == "suzuki":
                 future = executor.submit(fetch_suzuki)
             elif method == "mitsubishi":
                 future = executor.submit(fetch_mitsubishi)
             elif method == "nissan":
                 future = executor.submit(fetch_nissan)
-            future_map[future] = name
+            future_map = name
             
         for future in concurrent.futures.as_completed(future_map):
-            name = future_map[future]
+            name = future_map
             try:
                 news = future.result()
                 all_news.extend(news)
@@ -378,10 +423,7 @@ def collect_news():
                 
     # Sort by date descending
     def get_timestamp(n):
-        d = n["date"]
-        # Convert to naive timestamp for comparison
-        # Important: Unify timezone handling. If aware, convert to UTC. If naive, assume local.
-        # This might still be slightly off if sources mix timezones, but standardizing to timestamp is best effort.
+        d = n
         if d.tzinfo:
             return d.timestamp()
         else:
@@ -403,6 +445,6 @@ if __name__ == "__main__":
     print(f"Collected {len(items)} items (Past {FILTER_DAYS} days).")
     for i in items:
          try:
-            print(f"[{i['source']}] {i['date'].strftime('%Y-%m-%d')} - {i['title']}")
+            print(f"}] {i.strftime('%Y-%m-%d')} - {i}")
          except:
             pass
