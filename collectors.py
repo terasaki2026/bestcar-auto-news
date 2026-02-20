@@ -19,7 +19,7 @@ HEADERS = {
     )
 }
 
-FILTER_DAYS = 7
+FILTER_DAYS = 14
 
 RSS_SOURCES = {
     "Toyota": [
@@ -158,7 +158,75 @@ def fetch_rss_with_fallback(urls, source_name):
         if news: return news
     if source_name == "Subaru": return fetch_subaru_html()
     if source_name == "Mitsubishi Motors": return fetch_mitsubishi()
+    if source_name == "Honda": return fetch_honda_html()
+    if source_name == "Mazda": return fetch_mazda_html()
     return []
+
+def fetch_honda_html():
+    url = "https://www.honda.co.jp/news/"
+    base_url = "https://www.honda.co.jp"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding
+        soup = BeautifulSoup(resp.content, "html.parser")
+        news_list = []
+        # Find blocks that have both a title link and a date
+        for block in soup.find_all(True, class_=re.compile(r"layoutgroup|numeric|_title")):
+            link_node = block.select_one("a[href*='/topics/'], a[href*='/news/']")
+            date_node = block.select_one("._num")
+            if link_node and date_node:
+                title = link_node.get_text(strip=True)
+                if not title: continue
+                link = urljoin(base_url, link_node.get("href"))
+                dt = parse_datetime_safe(normalize_date_text(date_node.get_text(strip=True)))
+                if dt and is_within_period(dt):
+                    news_list.append({
+                        "source": "Honda",
+                        "title": clean_text(title),
+                        "url": link,
+                        "date": dt,
+                        "summary": trim_summary(fetch_page_summary(link), limit=200)
+                    })
+        return news_list
+    except Exception:
+        return []
+
+def fetch_mazda_html():
+    url = "https://newsroom.mazda.com/ja/"
+    base_url = "https://newsroom.mazda.com"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding
+        soup = BeautifulSoup(resp.content, "html.parser")
+        news_list = []
+        # Mazda's newsroom uses simple A tags with date text inside or nearby
+        for link_node in soup.select("a[href*='/publicity/release/']"):
+            text = link_node.get_text(strip=True)
+            # Match date pattern 202x.x.x
+            m = re.search(r"(202\d[./]\d{1,2}[./]\d{1,2})", text)
+            if not m:
+                # Try sibling or parent
+                text = link_node.parent.get_text(strip=True)
+                m = re.search(r"(202\d[./]\d{1,2}[./]\d{1,2})", text)
+            
+            if m:
+                dt = parse_datetime_safe(normalize_date_text(m.group(1)))
+                if dt and is_within_period(dt):
+                    title = text.replace(m.group(1), "").strip()
+                    # Remove "ニュースリリース" etc.
+                    title = re.sub(r"^\s*ニュースリリース\s*", "", title)
+                    news_list.append({
+                        "source": "Mazda",
+                        "title": clean_text(title),
+                        "url": urljoin(base_url, link_node.get("href")),
+                        "date": dt,
+                        "summary": trim_summary(fetch_page_summary(urljoin(base_url, link_node.get("href"))), limit=200)
+                    })
+        return news_list
+    except Exception:
+        return []
 
 def fetch_daihatsu():
     url = "https://www.daihatsu.com/jp/rss.xml"
