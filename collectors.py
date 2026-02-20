@@ -21,7 +21,6 @@ HEADERS = {
 
 FILTER_DAYS = 7
 
-
 RSS_SOURCES = {
     "Toyota": [
         "https://global.toyota/export/jp/allnews_rss.xml",
@@ -41,12 +40,10 @@ RSS_SOURCES = {
     ],
 }
 
-
 def clean_text(text):
     if not text:
         return ""
     try:
-        # Remove navigation/footer hints if they crept in
         text = re.sub(r"\s*（別ウィンドウで開く）\s*", "", str(text))
         soup = BeautifulSoup(text, "html.parser")
         clean = soup.get_text(separator=" ", strip=True)
@@ -54,13 +51,11 @@ def clean_text(text):
     except Exception:
         return str(text)
 
-
 def trim_summary(text, limit=200):
     cleaned = clean_text(text)
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[:limit].rstrip() + "..."
-
 
 def parse_datetime_safe(value):
     if value is None:
@@ -72,85 +67,43 @@ def parse_datetime_safe(value):
             return datetime(*value[:6], tzinfo=timezone.utc)
         except Exception:
             return None
-
     try:
-        dt = date_parser.parse(str(value))
-        return dt
+        return date_parser.parse(str(value))
     except Exception:
         return None
 
-
 def normalize_date_text(text):
-    return (
-        str(text)
-        .replace("年", "/")
-        .replace("月", "/")
-        .replace("日", "")
-        .replace(".", "/")
-    )
-
+    return str(text).replace("年", "/").replace("月", "/").replace("日", "").replace(".", "/")
 
 def extract_entry_datetime(entry):
-    text_keys = ["published", "updated", "created", "issued", "date", "dc_date"]
-    parsed_keys = ["published_parsed", "updated_parsed", "created_parsed"]
-
-    for key in text_keys:
-        value = getattr(entry, key, None)
-        dt = parse_datetime_safe(value)
-        if dt:
-            return dt
-
-    for key in parsed_keys:
-        value = getattr(entry, key, None)
-        dt = parse_datetime_safe(value)
-        if dt:
-            return dt
-
+    for key in ["published", "updated", "created", "issued", "date", "dc_date"]:
+        dt = parse_datetime_safe(getattr(entry, key, None))
+        if dt: return dt
+    for key in ["published_parsed", "updated_parsed", "created_parsed"]:
+        dt = parse_datetime_safe(getattr(entry, key, None))
+        if dt: return dt
     return None
 
-
 def is_within_period(dt):
-    if not dt:
-        return False
-
+    if not dt: return False
     try:
-        # 日本のニュースサイトはJST(UTC+9)を想定
-        # タイムゾーンがない場合はJSTとして扱うか、UTCとして扱うか
-        # 00:00:00 の場合、その日のうちは「本日」として扱いたいので少し未来も許容する
-        if dt.tzinfo is None:
-            # タイムゾーンがない場合はまずJST(+9)として補完を試みる
-            aware_dt = dt.replace(tzinfo=timezone(timedelta(hours=9)))
-        else:
-            aware_dt = dt
-
+        aware_dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone(timedelta(hours=9)))
         now_utc = datetime.now(timezone.utc)
         diff = now_utc - aware_dt.astimezone(timezone.utc)
-        
-        # 本日のニュースが「未来」にならないよう、12時間のバッファを持たせる
-        # また、FILTER_DAYSの日数内であることを確認
         return timedelta(hours=-12) <= diff <= timedelta(days=FILTER_DAYS, hours=23)
-    except Exception as e:
-        print(f"Date check error: {e}")
+    except Exception:
         return False
 
-
 def fetch_page_summary(url):
-    if not url:
-        return ""
-
+    if not url: return ""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=8)
-        if resp.status_code != 200:
-            return ""
-
+        if resp.status_code != 200: return ""
         resp.encoding = resp.apparent_encoding
         soup = BeautifulSoup(resp.content, "html.parser")
-
         for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
             tag.decompose()
-
         container = soup.select_one("main") or soup.select_one("article") or soup
-
         text_content = []
         total_len = 0
         for p in container.find_all("p"):
@@ -158,81 +111,54 @@ def fetch_page_summary(url):
             if len(t) > 20:
                 text_content.append(t)
                 total_len += len(t)
-            if total_len > 300:
-                break
-
+            if total_len > 300: break
         return trim_summary(" ".join(text_content), limit=200)
     except Exception:
         return ""
 
-
 def _parse_rss_with_headers(url):
-    # 余計な末尾スラッシュを除去
     url = url.rstrip("/")
-    
-    # より強力なヘッダー設定（Honda等の403対策）
     headers = HEADERS.copy()
     headers.update({
         "Accept": "application/rss+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "ja,en-US;q=0.7,en;q=0.3",
         "Referer": "https://www.google.com/",
     })
-    
     resp = requests.get(url, headers=headers, timeout=10)
     resp.raise_for_status()
     return feedparser.parse(resp.content)
 
-
 def fetch_rss(url, source_name):
     try:
-        if not url:
-            return []
-
+        if not url: return []
         feed = _parse_rss_with_headers(url)
         news_list = []
-
         for entry in feed.entries:
             dt = extract_entry_datetime(entry)
-            if dt is None or not is_within_period(dt):
-                continue
-
+            if dt is None or not is_within_period(dt): continue
             summary_raw = getattr(entry, "summary", "") or getattr(entry, "description", "")
             summary = clean_text(summary_raw)
             if len(summary) < 50:
                 detail_summary = fetch_page_summary(getattr(entry, "link", ""))
-                if detail_summary:
-                    summary = detail_summary
-
-            news_list.append(
-                {
-                    "source": source_name,
-                    "title": clean_text(getattr(entry, "title", "No Title")),
-                    "url": getattr(entry, "link", ""),
-                    "date": dt,
-                    "summary": trim_summary(summary, limit=200),
-                }
-            )
-
+                if detail_summary: summary = detail_summary
+            news_list.append({
+                "source": source_name,
+                "title": clean_text(getattr(entry, "title", "No Title")),
+                "url": getattr(entry, "link", ""),
+                "date": dt,
+                "summary": trim_summary(summary, limit=200),
+            })
         return news_list
-    except Exception as e:
-        # print(f"Error fetching RSS {source_name} ({url}): {e}")
+    except Exception:
         return []
-
 
 def fetch_rss_with_fallback(urls, source_name):
     for url in urls:
         news = fetch_rss(url, source_name)
-        if news:
-            return news
-    
-    # 特殊なフォールバック
-    if source_name == "Subaru":
-        return fetch_subaru_html()
-    if source_name == "Mitsubishi Motors":
-        return fetch_mitsubishi()
-    
+        if news: return news
+    if source_name == "Subaru": return fetch_subaru_html()
+    if source_name == "Mitsubishi Motors": return fetch_mitsubishi()
     return []
-
 
 def fetch_daihatsu():
     url = "https://www.daihatsu.com/jp/rss.xml"
@@ -240,233 +166,130 @@ def fetch_daihatsu():
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         resp.encoding = resp.apparent_encoding
-
         soup = BeautifulSoup(resp.content, "xml")
-        items = soup.find_all("item")
         news_list = []
-
-        for item in items:
-            raw_title = item.find("title").get_text(strip=True) if item.find("title") else ""
+        for item in soup.find_all("item"):
+            title = item.find("title").get_text(strip=True) if item.find("title") else ""
             link = item.find("link").get_text(strip=True) if item.find("link") else ""
-
             dt = None
-            date_match = re.match(r"(\d{4}-\d{2}-\d{2})\s*", raw_title)
-            if date_match:
-                dt = parse_datetime_safe(date_match.group(1))
-
-            if dt is None or not is_within_period(dt):
-                continue
-
-            clean_title = re.sub(r"^\d{4}-\d{2}-\d{2}\s*", "", raw_title) or raw_title
-            summary = trim_summary(fetch_page_summary(link), limit=200)
-
-            news_list.append(
-                {
-                    "source": "Daihatsu",
-                    "title": clean_text(clean_title),
-                    "url": link,
-                    "date": dt,
-                    "summary": summary,
-                }
-            )
-
+            date_match = re.match(r"(\d{4}-\d{2}-\d{2})\s*", title)
+            if date_match: dt = parse_datetime_safe(date_match.group(1))
+            if dt is None or not is_within_period(dt): continue
+            clean_title = re.sub(r"^\d{4}-\d{2}-\d{2}\s*", "", title) or title
+            news_list.append({
+                "source": "Daihatsu",
+                "title": clean_text(clean_title),
+                "url": link,
+                "date": dt,
+                "summary": trim_summary(fetch_page_summary(link), limit=200),
+            })
         return news_list
-    except Exception as e:
-        print(f"Error fetching Daihatsu: {e}")
+    except Exception:
         return []
-
 
 def fetch_suzuki():
     url = "https://www.suzuki.co.jp/release/release.xml"
-    base_url = "https://www.suzuki.co.jp"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
         resp.encoding = resp.apparent_encoding
-
         soup = BeautifulSoup(resp.content, "xml")
-        items = soup.find_all("item")
         news_list = []
-
-        for item in items:
+        for item in soup.find_all("item"):
             title = item.find("ttl").get_text(strip=True) if item.find("ttl") else "No Title"
             link_rel = item.find("link").get_text(strip=True) if item.find("link") else ""
             date_str = item.find("date").get_text(strip=True) if item.find("date") else ""
-
             dt = parse_datetime_safe(normalize_date_text(date_str))
-            if dt:
-                dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
-
-            if dt is None or not is_within_period(dt):
-                continue
-
-            full_url = urljoin(base_url, link_rel)
-            summary = trim_summary(fetch_page_summary(full_url), limit=200)
-
-            news_list.append(
-                {
-                    "source": "Suzuki",
-                    "title": clean_text(title),
-                    "url": full_url,
-                    "date": dt,
-                    "summary": summary,
-                }
-            )
-
+            if dt: dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            if dt is None or not is_within_period(dt): continue
+            full_url = urljoin("https://www.suzuki.co.jp", link_rel)
+            news_list.append({
+                "source": "Suzuki",
+                "title": clean_text(title),
+                "url": full_url,
+                "date": dt,
+                "summary": trim_summary(fetch_page_summary(full_url), limit=200),
+            })
         return news_list
-    except Exception as e:
-        print(f"Error fetching Suzuki: {e}")
+    except Exception:
         return []
-
 
 def fetch_mitsubishi():
-    # ニュースルームのインデックスページから直接取得
-    url = "https://www.mitsubishi-motors.com/jp/newsroom/index.html"
-    base_url = "https://www.mitsubishi-motors.com"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = requests.get("https://www.mitsubishi-motors.com/jp/newsroom/index.html", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         resp.encoding = resp.apparent_encoding
         soup = BeautifulSoup(resp.content, "html.parser")
-
         news_list = []
-        # 最新のデザインに合わせたセレクタ
-        items = soup.select(".m_newsMedia__item")
-
-        for item in items:
+        for item in soup.select(".m_newsMedia__item"):
             link_node = item.select_one("a.m_newsMedia__link")
-            if not link_node:
-                continue
-
+            if not link_node: continue
             title_node = item.select_one(".m_newsMedia__text")
             title = title_node.get_text(strip=True) if title_node else "No Title"
-            
-            link = link_node.get("href")
-            full_link = urljoin(base_url, link)
-
+            link = urljoin("https://www.mitsubishi-motors.com", link_node.get("href"))
             date_node = item.select_one("time.m_newsMedia__time")
-            dt = None
-            if date_node:
-                dt_str = date_node.get("datetime") or date_node.get_text(strip=True)
-                dt = parse_datetime_safe(normalize_date_text(dt_str))
-
-            if dt is None or not is_within_period(dt):
-                continue
-
-            summary = trim_summary(fetch_page_summary(full_link), limit=200)
-            news_list.append(
-                {
-                    "source": "Mitsubishi Motors",
-                    "title": clean_text(title),
-                    "url": full_link,
-                    "date": dt,
-                    "summary": summary,
-                }
-            )
-
+            dt = parse_datetime_safe(normalize_date_text(date_node.get("datetime") or date_node.get_text(strip=True))) if date_node else None
+            if dt is None or not is_within_period(dt): continue
+            news_list.append({
+                "source": "Mitsubishi Motors",
+                "title": clean_text(title),
+                "url": link,
+                "date": dt,
+                "summary": trim_summary(fetch_page_summary(link), limit=200),
+            })
         return news_list
-    except Exception as e:
-        print(f"Error fetching Mitsubishi: {e}")
+    except Exception:
         return []
 
-
 def fetch_subaru_html():
-    url = "https://www.subaru.co.jp/news/"
-    base_url = "https://www.subaru.co.jp"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = requests.get("https://www.subaru.co.jp/news/", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         resp.encoding = resp.apparent_encoding
         soup = BeautifulSoup(resp.content, "html.parser")
-
         news_list = []
-        # ニュースリストを抽出 (h1 ~ h2 の間にあるリストなどを狙う)
-        items = soup.select(".section_news-list li, .news-list li, ul li")
-        
-        for item in items:
+        for item in soup.select(".section_news-list li, .news-list li, ul li"):
             link_node = item.select_one("a")
-            if not link_node or not link_node.get("href"):
-                continue
-            
-            # 日付らしきテキストを探す
-            text = item.get_text(" ", strip=True)
-            m = re.search(r"(\d{4}[/年]\d{1,2}[/月]\d{1,2})", text)
-            dt = None
-            if m:
-                dt = parse_datetime_safe(normalize_date_text(m.group(1)))
-            
-            if dt is None or not is_within_period(dt):
-                continue
-
-            title = link_node.get_text(strip=True)
-            full_link = urljoin(base_url, link_node.get("href"))
-            
-            summary = trim_summary(fetch_page_summary(full_link), limit=200)
-            
+            if not link_node or not link_node.get("href"): continue
+            m = re.search(r"(\d{4}[/年]\d{1,2}[/月]\d{1,2})", item.get_text(" ", strip=True))
+            dt = parse_datetime_safe(normalize_date_text(m.group(1))) if m else None
+            if dt is None or not is_within_period(dt): continue
+            link = urljoin("https://www.subaru.co.jp", link_node.get("href"))
             news_list.append({
                 "source": "Subaru",
-                "title": clean_text(title),
-                "url": full_link,
+                "title": clean_text(link_node.get_text(strip=True)),
+                "url": link,
                 "date": dt,
-                "summary": summary
+                "summary": trim_summary(fetch_page_summary(link), limit=200)
             })
-            
         return news_list
-    except Exception as e:
-        print(f"Error fetching Subaru HTML: {e}")
+    except Exception:
         return []
-
 
 def fetch_nissan():
-    url = "https://global.nissannews.com/ja-JP/channels/news"
-    base_domain = "https://global.nissannews.com"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = requests.get("https://global.nissannews.com/ja-JP/channels/news", headers=HEADERS, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
-
-        items = soup.select("div.release-item")
         news_list = []
-
-        for item in items:
+        for item in soup.select("div.release-item"):
             title_node = item.select_one("div.title a")
-            if not title_node:
-                continue
-
-            title = title_node.get_text(strip=True)
-            link = title_node.get("href")
-            if not link:
-                continue
-
-            full_url = urljoin(base_domain, link)
-
+            if not title_node: continue
+            link = urljoin("https://global.nissannews.com", title_node.get("href"))
             date_node = item.select_one("time.pub-date")
-            dt = None
-            if date_node:
-                dt_attr = date_node.get("datetime")
-                dt = parse_datetime_safe(dt_attr)
-                if dt is None:
-                    dt = parse_datetime_safe(normalize_date_text(date_node.get_text(strip=True)))
-
-            if dt is None or not is_within_period(dt):
-                continue
-
-            summary = trim_summary(fetch_page_summary(full_url), limit=200)
-            news_list.append(
-                {
-                    "source": "Nissan",
-                    "title": clean_text(title),
-                    "url": full_url,
-                    "date": dt,
-                    "summary": summary,
-                }
-            )
-
+            dt = parse_datetime_safe(date_node.get("datetime")) if date_node else None
+            if dt is None: dt = parse_datetime_safe(normalize_date_text(date_node.get_text(strip=True))) if date_node else None
+            if dt is None or not is_within_period(dt): continue
+            news_list.append({
+                "source": "Nissan",
+                "title": clean_text(title_node.get_text(strip=True)),
+                "url": link,
+                "date": dt,
+                "summary": trim_summary(fetch_page_summary(link), limit=200),
+            })
         return news_list
-    except Exception as e:
-        print(f"Error fetching Nissan: {e}")
+    except Exception:
         return []
-
 
 def collect_news():
     sources = [
@@ -479,51 +302,27 @@ def collect_news():
         ("Mitsubishi Motors", "", "mitsubishi"),
         ("Nissan", "", "nissan"),
     ]
-
     all_news = []
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_map = {}
         for name, data, method in sources:
-            if method == "rss_multi":
-                future = executor.submit(fetch_rss_with_fallback, data, name)
-            elif method == "daihatsu":
-                future = executor.submit(fetch_daihatsu)
-            elif method == "suzuki":
-                future = executor.submit(fetch_suzuki)
-            elif method == "mitsubishi":
-                future = executor.submit(fetch_mitsubishi)
-            elif method == "nissan":
-                future = executor.submit(fetch_nissan)
-            else:
-                continue
-
+            if method == "rss_multi": future = executor.submit(fetch_rss_with_fallback, data, name)
+            elif method == "daihatsu": future = executor.submit(fetch_daihatsu)
+            elif method == "suzuki": future = executor.submit(fetch_suzuki)
+            elif method == "mitsubishi": future = executor.submit(fetch_mitsubishi)
+            elif method == "nissan": future = executor.submit(fetch_nissan)
+            else: continue
             future_map[future] = name
-
         for future in concurrent.futures.as_completed(future_map):
-            name = future_map[future]
             try:
-                news = future.result()
-                all_news.extend(news)
-                print(f"Fetched {len(news)} items from {name}")
-            except Exception as e:
-                print(f"Failed to collect from {name}: {e}")
-
+                all_news.extend(future.result())
+            except Exception:
+                pass
     all_news.sort(key=lambda item: item.get("date").timestamp() if item.get("date") else 0, reverse=True)
     return all_news
 
-
 if __name__ == "__main__":
-    try:
-        if sys.stdout.encoding and sys.stdout.encoding.lower() == "cp932":
-            sys.stdout.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
-
     items = collect_news()
-    print(f"Collected {len(items)} items (Past {FILTER_DAYS} days).")
+    print(f"Collected {len(items)} items.")
     for item in items:
-        try:
-            print(f"[{item['source']}] {item['date'].strftime('%Y-%m-%d')} - {item['title']}")
-        except Exception:
-            pass
+        print(f"[{item['source']}] {item['date'].strftime('%Y-%m-%d')} - {item['title']}")
