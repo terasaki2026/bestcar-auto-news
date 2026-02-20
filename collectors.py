@@ -1,7 +1,8 @@
 import concurrent.futures
 import re
 import sys
-from datetime import datetime
+import time
+from datetime import datetime, timedelta, timezone
 
 import feedparser
 import requests
@@ -19,6 +20,46 @@ HEADERS = {
 
 # 取得期間設定（直近7日）
 FILTER_DAYS = 7
+
+
+def parse_datetime_safe(value):
+    """文字列/struct_time などを datetime に変換する。"""
+    if value is None:
+        return None
+
+    if isinstance(value, datetime):
+        return value
+
+    if isinstance(value, time.struct_time):
+        try:
+            return datetime(*value[:6], tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    try:
+        return date_parser.parse(str(value))
+    except Exception:
+        return None
+
+
+def extract_entry_datetime(entry):
+    """feedparser entry から日付候補を抽出する。"""
+    text_keys = ["published", "updated", "created", "issued", "date", "dc_date"]
+    parsed_keys = ["published_parsed", "updated_parsed", "created_parsed"]
+
+    for key in text_keys:
+        if hasattr(entry, key):
+            dt = parse_datetime_safe(getattr(entry, key))
+            if dt:
+                return dt
+
+    for key in parsed_keys:
+        if hasattr(entry, key):
+            dt = parse_datetime_safe(getattr(entry, key))
+            if dt:
+                return dt
+
+    return None
 
 
 def clean_text(text):
@@ -49,9 +90,10 @@ def is_within_period(dt):
         return False
 
     try:
-        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
-        diff = now - dt
-        return 0 <= diff.days <= FILTER_DAYS
+        base = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        diff = now - base.astimezone(timezone.utc)
+        return timedelta(0) <= diff <= timedelta(days=FILTER_DAYS, hours=23, minutes=59)
     except Exception as e:
         print(f"Date check error: {e}")
         return False
@@ -92,26 +134,37 @@ def fetch_page_summary(url):
 
 # --- Independent Source Fetchers ---
 
+def _parse_rss_with_headers(url):
+    """RSSをUser-Agent付きで取得し、feedparserで解釈する。"""
+    resp = requests.get(url, headers=HEADERS, timeout=10)
+    resp.raise_for_status()
+    return feedparser.parse(resp.content)
+
+
 def fetch_rss(url, source_name):
     """Fetch and parse standard RSS/Atom feeds using feedparser."""
     try:
-        feed = feedparser.parse(url)
+        if not url:
+            return []
+
+        feed = _parse_rss_with_headers(url)
+        if feed.bozo and not feed.entries:
+            print(f"RSS parse warning ({source_name}): {feed.bozo_exception}")
+
         news_list = []
 
-        for entry in feed.entries:
-            dt = None
-            if hasattr(entry, "published"):
-                try:
-                    dt = date_parser.parse(entry.published)
-                except Exception:
-                    pass
-            elif hasattr(entry, "updated"):
-                try:
-                    dt = date_parser.parse(entry.updated)
-                except Exception:
-                    pass
+        skipped_no_date = 0
+        skipped_out_of_period = 0
 
-            if dt is None or not is_within_period(dt):
+        for entry in feed.entries:
+            dt = extract_entry_datetime(entry)
+
+            if dt is None:
+                skipped_no_date += 1
+                continue
+
+            if not is_within_period(dt):
+                skipped_out_of_period += 1
                 continue
 
             summary_raw = ""
@@ -136,10 +189,25 @@ def fetch_rss(url, source_name):
                 }
             )
 
+        if not news_list:
+            print(
+                f"RSS had no usable items ({source_name}): "
+                f"entries={len(feed.entries)}, no_date={skipped_no_date}, out_of_period={skipped_out_of_period}"
+            )
+
         return news_list
     except Exception as e:
         print(f"Error fetching RSS {source_name}: {e}")
         return []
+
+
+def fetch_rss_with_fallback(urls, source_name):
+    """複数RSS URLを順に試し、最初に取得できた結果を返す。"""
+    for url in urls:
+        news = fetch_rss(url, source_name)
+        if news:
+            return news
+    return []
 
 
 def fetch_daihatsu():
@@ -253,7 +321,10 @@ def fetch_mitsubishi():
         soup = BeautifulSoup(resp.content, "html.parser")
 
         news_list = []
-        items = soup.select(".newsList li, .news-list-item, .list-news li, .c-newsList__item")
+        items = soup.select(
+            ".newsList li, .news-list-item, .list-news li, .c-newsList__item, "
+            ".news-release-list li, .newsrelease-list li, li.news-item"
+        )
 
         for item in items:
             title_node = item.select_one("a")
@@ -268,7 +339,7 @@ def fetch_mitsubishi():
             if link.startswith("/"):
                 link = base_url + link
 
-            date_node = item.select_one("time, .date, .c-newsList__date")
+            date_node = item.select_one("time, .date, .c-newsList__date, .news-date")
             dt = None
             if date_node:
                 date_str = date_node.get_text(strip=True)
@@ -278,6 +349,15 @@ def fetch_mitsubishi():
                     dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
                 except Exception:
                     pass
+
+            if dt is None:
+                item_text = item.get_text(" ", strip=True)
+                m = re.search(r"(\d{4})[./年-](\d{1,2})[./月-](\d{1,2})", item_text)
+                if m:
+                    try:
+                        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                    except Exception:
+                        pass
 
             if dt is None or not is_within_period(dt):
                 continue
@@ -373,10 +453,38 @@ def collect_news():
     Returns: List of dictionaries sorted by date (newest first).
     """
     sources = [
-        ("Toyota", "https://global.toyota/jp/newsroom/rss.xml", "rss"),
-        ("Honda", "https://global.honda/jp/topics/rss.xml", "rss"),
-        ("Mazda", "https://newsroom.mazda.com/ja/publicity/release/rss.xml", "rss"),
-        ("Subaru", "https://www.subaru.co.jp/press/rss.xml", "rss"),
+        (
+            "Toyota",
+            [
+                "https://global.toyota/jp/newsroom/rss.xml",
+                "https://global.toyota/jp/newsroom/toyota/feed.xml",
+            ],
+            "rss_multi",
+        ),
+        (
+            "Honda",
+            [
+                "https://global.honda/jp/topics/rss.xml",
+                "https://global.honda/jp/newsroom/newsroom.xml",
+            ],
+            "rss_multi",
+        ),
+        (
+            "Mazda",
+            [
+                "https://newsroom.mazda.com/ja/publicity/release/rss.xml",
+                "https://newsroom.mazda.com/ja/rss/news_release.xml",
+            ],
+            "rss_multi",
+        ),
+        (
+            "Subaru",
+            [
+                "https://www.subaru.co.jp/press/rss.xml",
+                "https://www.subaru.co.jp/news/feed/",
+            ],
+            "rss_multi",
+        ),
         ("Daihatsu", "", "daihatsu"),
         ("Suzuki", "", "suzuki"),
         ("Mitsubishi Motors", "", "mitsubishi"),
@@ -390,6 +498,8 @@ def collect_news():
         for name, url, method in sources:
             if method == "rss":
                 future = executor.submit(fetch_rss, url, name)
+            elif method == "rss_multi":
+                future = executor.submit(fetch_rss_with_fallback, url, name)
             elif method == "daihatsu":
                 future = executor.submit(fetch_daihatsu)
             elif method == "suzuki":
