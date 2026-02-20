@@ -210,21 +210,25 @@ def fetch_suzuki():
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
-        resp.encoding = resp.apparent_encoding 
+        resp.encoding = resp.apparent_encoding
         
-        soup = BeautifulSoup(resp.content, "xml") 
+        soup = BeautifulSoup(resp.content, "xml")
         items = soup.find_all("item")
         news_list =[]
         
+        # Limit items to check
         for item in items:
             title = item.find("ttl").get_text(strip=True) if item.find("ttl") else "No Title"
             link_rel = item.find("link").get_text(strip=True) if item.find("link") else ""
             date_str = item.find("date").get_text(strip=True) if item.find("date") else ""
             
+            # Date parsing
             dt = None
             try:
+                # Common formats: 2026年2月13日, 2026.2.13, 2026/2/13
                 d_s = date_str.replace("年", "/").replace("月", "/").replace("日", "").replace(".", "/")
                 parsed_dt = date_parser.parse(d_s)
+                # Set time to 00:00:00 explicitly for date-only strings
                 dt = parsed_dt.replace(hour=0, minute=0, second=0, microsecond=0)
             except:
                 pass
@@ -255,7 +259,7 @@ def fetch_suzuki():
 def fetch_mitsubishi():
     """
     Fetch Mitsubishi Motors news from their official HTML page.
-    APIを使わず、直接ニュースリリース一覧ページをスクレイピングする方式
+    APIを使わず、直接ニュースリリース一覧ページをスクレイピングする方式に変更
     """
     url = "https://www.mitsubishi-motors.com/jp/newsroom/newsrelease/"
     base_url = "https://www.mitsubishi-motors.com"
@@ -267,10 +271,10 @@ def fetch_mitsubishi():
         
         news_list =[]
         
-        # ニュース一覧を抽出
+        # ニュース一覧を抽出（よくあるクラス名で広く拾えるように複数指定）
         items = soup.select(".newsList li, .news-list-item, .list-news li, .c-newsList__item")
         
-        for item in items:
+        for item in items: # 直近20件に制限
             title_node = item.select_one("a")
             if not title_node:
                 continue
@@ -285,11 +289,12 @@ def fetch_mitsubishi():
             if link.startswith("/"):
                 link = base_url + link
                 
-            # 日付の取得
+            # 日付の取得（<time> タグや特定のクラス名を探す）
             date_node = item.select_one("time, .date, .c-newsList__date")
             dt = None
             if date_node:
                 date_str = date_node.get_text(strip=True)
+                # "2026年2月13日" や "2026.02.13" などを標準フォーマットに変換
                 d_s = date_str.replace("年", "/").replace("月", "/").replace("日", "").replace(".", "/")
                 try:
                     dt = date_parser.parse(d_s)
@@ -297,9 +302,11 @@ def fetch_mitsubishi():
                 except:
                     pass
             
+            # 日付が取得できない、または期間外の場合はスキップ
             if dt is None or not is_within_period(dt):
                 continue
                 
+            # 詳細ページから本文の冒頭を取得して要約にする
             summary = fetch_page_summary(link)
             if len(summary) >= 200: 
                 summary += "..."
@@ -328,9 +335,11 @@ def fetch_nissan():
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
         
+        # Select items
         items = soup.select("div.release-item")
-        news_list = []
+        news_list =[]
         
+        # Limit to first 15 items to fetch details for speed
         for item in items:
             title_node = item.select_one("div.title a")
             if not title_node:
@@ -343,9 +352,11 @@ def fetch_nissan():
             elif link and not link.startswith("http"):
                  pass 
 
+            # Date
             date_node = item.select_one("time.pub-date")
             dt = None
             if date_node:
+                # Try datetime attribute first
                 dt_attr = date_node.get("datetime")
                 if dt_attr:
                     try:
@@ -353,9 +364,11 @@ def fetch_nissan():
                     except:
                         pass
                 
+                # Try text content fallback
                 if dt is None:
                     try:
                         d_text = date_node.get_text(strip=True)
+                        # Replace JP chars
                         d_text = d_text.replace("年", "/").replace("月", "/").replace("日", "").replace(".", "/")
                         parsed_dt = date_parser.parse(d_text)
                         dt = parsed_dt.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -382,6 +395,7 @@ def fetch_nissan():
     except Exception as e:
         print(f"Error fetching Nissan: {e}")
         return[]
+
 
 # --- Main Coordinator ---
 
@@ -421,6 +435,7 @@ def collect_news():
     # Sort by date descending
     def get_timestamp(n):
         d = n
+        # Convert to naive timestamp for comparison
         if d.tzinfo:
             return d.timestamp()
         else:
