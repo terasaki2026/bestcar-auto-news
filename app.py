@@ -2,6 +2,7 @@ import streamlit as st
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from collectors import collect_news
+from data_manager import load_news, save_news, load_history, save_history, merge_news
 
 # 日本標準時 (JST) の定義
 JST = timezone(timedelta(hours=9))
@@ -39,6 +40,10 @@ if not st.session_state["authenticated"]:
                     st.error("Invalid ID or Password")
     st.stop()
 
+# セッション状態の初期化
+if "display_count" not in st.session_state:
+    st.session_state["display_count"] = 20
+
 st.markdown("""
 <style>
     .news-card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); border: 1px solid #eee; }
@@ -48,20 +53,37 @@ st.markdown("""
     .news-title a { text-decoration: none; color: #333; }
     .news-summary { font-size: 0.9rem; color: #555; line-height: 1.6; }
     .read-more { font-size: 0.85rem; color: #e63946; font-weight: 600; text-decoration: none; }
+    .more-button-container { display: flex; justify-content: center; margin: 30px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=600)
-def load_data():
-    return collect_news()
+# データの読み込み
+news_items = load_news()
+fetch_history = load_history()
 
 st.title("🚗 BestCar Auto News")
-with st.spinner("Fetching news..."):
-    news_items = load_data()
 
+# ニュース取得関数
+def refresh_news():
+    with st.spinner("最新ニュースを取得中..."):
+        try:
+            new_items = collect_news()
+            current_news = load_news()
+            merged = merge_news(current_news, new_items)
+            save_news(merged)
+            
+            # 更新履歴の保存（チェックした時刻として記録）
+            now_str = datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")
+            save_history(now_str)
+            return True
+        except Exception as e:
+            st.error(f"取得中にエラーが発生しました: {e}")
+            return False
+
+# 初回起動時などでデータがない場合の自動取得
 if not news_items:
-    st.warning("No news found.")
-    st.stop()
+    refresh_news()
+    st.rerun()
 
 source_counts = Counter(item.get("source", "Unknown") for item in news_items)
 
@@ -69,19 +91,26 @@ st.sidebar.header("📊 ニュース管理")
 
 # 更新ボタン
 if st.sidebar.button("🔄 最新ニュースに更新", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
+    if refresh_news():
+        st.session_state["display_count"] = 20  # 更新時は表示件数をリセット
+        st.rerun()
 
-# 更新日時（日本標準時）
-# 画面が読み込まれるたびに、現在のJST時刻を表示します
-last_updated = datetime.now(JST).strftime("%Y年%m月%d日 %H:%M:%S")
-st.sidebar.caption(f"データ最終同期 (JST):\n{last_updated}")
-st.sidebar.caption("※更新ボタン押下または画面操作時の時刻")
+# 更新履歴の表示
+st.sidebar.markdown("---")
+st.sidebar.subheader("🕒 更新履歴 (最新10件)")
+if fetch_history:
+    for idx, ts in enumerate(fetch_history):
+        if idx == 0:
+            st.sidebar.caption(f"**前回: {ts}**")
+        else:
+            st.sidebar.caption(f"{ts}")
+else:
+    st.sidebar.caption("履歴なし")
 
 st.sidebar.markdown("---")
 st.sidebar.header("🔍 フィルタ設定")
 
-all_sources = sorted(set(item["source"] for item in news_items))
+all_sources = sorted(set(item["source"] for item in news_items)) if news_items else EXPECTED_SOURCES
 selected_sources = st.sidebar.multiselect("メーカー選択", options=all_sources, default=all_sources)
 search_query = st.sidebar.text_input("キーワード検索", placeholder="例: EV, SUV...")
 
@@ -92,6 +121,7 @@ for source in EXPECTED_SOURCES:
     label = "🟢" if count > 0 else "🔴"
     st.sidebar.write(f"{label} {source}: {count}件")
 
+# フィルタリング
 filtered_items = []
 for item in news_items:
     if item["source"] not in selected_sources:
@@ -102,10 +132,17 @@ for item in news_items:
             continue
     filtered_items.append(item)
 
-st.caption(f"表示件数: {len(filtered_items)} / 総取得件数: {len(news_items)}")
+st.caption(f"表示中: {min(len(filtered_items), st.session_state['display_count'])} / フィルタ後件数: {len(filtered_items)} / 総保存件数: {len(news_items)}")
 
-for item in filtered_items:
-    date_str = item["date"].strftime("%Y/%m/%d")
+# ニュースの表示（表示件数制限）
+displayed_items = filtered_items[:st.session_state["display_count"]]
+
+for item in displayed_items:
+    try:
+        date_str = item["date"].strftime("%Y/%m/%d")
+    except Exception:
+        date_str = str(item["date"])
+        
     st.markdown(f"""
     <div class="news-card">
         <div><span class="news-source">{item['source']}</span><span class="news-date">{date_str}</span></div>
@@ -114,6 +151,14 @@ for item in filtered_items:
         <a href="{item['url']}" target="_blank" class="read-more">元記事を読む →</a>
     </div>
     """, unsafe_allow_html=True)
+
+# 「もっと読む」ボタン
+if len(filtered_items) > st.session_state["display_count"]:
+    st.markdown('<div class="more-button-container">', unsafe_allow_html=True)
+    if st.button("もっと読む", type="primary"):
+        st.session_state["display_count"] += 20
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")
 st.markdown("© 2026 BestCar Auto News Project")
